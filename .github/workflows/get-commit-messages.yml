@@ -1,0 +1,86 @@
+name: Get Commit Messages
+on:
+  workflow_call:
+    inputs:
+      commit_count:
+        description: 'Number of recent commits to retrieve'
+        required: false
+        default: '10'
+        type: string
+    outputs:
+      commit_messages:
+        description: "Recent commit messages with metadata in JSON format"
+        value: ${{ jobs.fetch-commits.outputs.commit_messages }}
+      
+jobs:
+  fetch-commits:
+    runs-on: ubuntu-latest
+    outputs:
+      commit_messages: ${{ steps.extract-history.outputs.commit_messages }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: ${{ inputs.commit_count }}
+          
+      - name: Extract commit history
+        id: extract-history
+        run: |
+          COMMIT_COUNT="${{ inputs.commit_count }}"
+          
+          # Create a temporary file to build JSON safely
+          temp_file=$(mktemp)
+          echo "[]" > "$temp_file"
+          
+          # Get commit data and process safely
+          git log -n "$COMMIT_COUNT" --no-decorate --pretty=format:'%H%n%ci%n%s%n%an%n---COMMIT-END---' | \
+          while IFS= read -r line; do
+            if [ "$line" = "---COMMIT-END---" ]; then
+              if [ -n "$sha" ] && [ -n "$date" ] && [ -n "$msg" ] && [ -n "$author" ]; then
+                # Calculate time ago
+                now=$(date -u +"%s")
+                commit_sec=$(date -u -d "$date" +"%s" 2>/dev/null || echo "$now")
+                diff=$((now - commit_sec))
+                
+                if [ $diff -lt 60 ]; then
+                  ago="${diff}s ago"
+                elif [ $diff -lt 3600 ]; then
+                  ago="$((diff/60))m ago"
+                elif [ $diff -lt 86400 ]; then
+                  ago="$((diff/3600))h ago"
+                else
+                  ago="$((diff/86400))d ago"
+                fi
+                
+                # Use jq to safely build JSON object and append to array
+                jq --arg title "$ago" \
+                   --arg value "[${msg}](https://github.com/${GITHUB_REPOSITORY}/commit/${sha}) ($author)" \
+                   '. += [{"title": $title, "value": $value}]' \
+                   "$temp_file" > "${temp_file}.tmp" && mv "${temp_file}.tmp" "$temp_file"
+              fi
+              sha=""
+              date=""
+              msg=""
+              author=""
+              line_count=0
+            else
+              line_count=$((line_count + 1))
+              case $line_count in
+                1) sha="$line" ;;
+                2) date="$line" ;;
+                3) msg="$line" ;;
+                4) author="$line" ;;
+                *) msg="${msg}${line}" ;;  # Handle multi-line commit messages
+              esac
+            fi
+          done
+          
+          # Output the final JSON
+          commit_data=$(cat "$temp_file" | jq -c .)
+          rm -f "$temp_file" "${temp_file}.tmp"
+          
+          {
+            echo "commit_messages<<EOF"
+            echo "$commit_data"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
