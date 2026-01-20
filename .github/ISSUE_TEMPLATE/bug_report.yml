@@ -1,0 +1,156 @@
+name: Bug Report
+description: Report a bug or unexpected behavior
+title: "[Bug]: "
+labels: ["type:bug", "priority:medium"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a bug! Please fill out the information below to help us investigate.
+
+        **Before submitting**, please review the [README](https://github.com/marcus-hooper/workflows#readme) for usage guidance.
+
+        **Tip**: Enable debug logging by adding `ACTIONS_STEP_DEBUG: true` to your repository secrets or workflow env for more detailed output.
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: A clear description of the bug
+      placeholder: What happened?
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to Reproduce
+      description: How can we reproduce this issue?
+      placeholder: |
+        1. Configure workflow with...
+        2. Run the workflow...
+        3. See error...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected Behavior
+      description: What did you expect to happen?
+      placeholder: What should have happened?
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual Behavior
+      description: What actually happened?
+      placeholder: |
+        Describe the actual behavior:
+        - What output did you see?
+        - Did it fail silently or with an error?
+    validations:
+      required: true
+
+  - type: textarea
+    id: workflow
+    attributes:
+      label: Workflow Configuration
+      description: Paste your workflow YAML that calls the reusable workflow (redact any secrets)
+      render: yaml
+      placeholder: |
+        jobs:
+          get-commits:
+            uses: marcus-hooper/workflows/.github/workflows/get-commit-messages.yml@main
+            with:
+              commit_count: '10'
+    validations:
+      required: true
+
+  - type: dropdown
+    id: workflow-name
+    attributes:
+      label: Reusable Workflow
+      description: Which workflow are you using?
+      options:
+        - get-commit-messages.yml
+        - Other (specify in additional context)
+    validations:
+      required: true
+
+  - type: dropdown
+    id: runner
+    attributes:
+      label: Runner OS
+      description: Which runner is the calling workflow using?
+      options:
+        - ubuntu-latest
+        - ubuntu-24.04
+        - ubuntu-22.04
+        - windows-latest
+        - macos-latest
+        - Self-hosted (specify in additional context)
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Workflow Version
+      description: Which version/ref of the reusable workflow are you using?
+      placeholder: "main, v1, or specific SHA"
+    validations:
+      required: true
+
+  - type: textarea
+    id: error-message
+    attributes:
+      label: Error Message
+      description: The exact error message (if any), including stack traces
+      render: shell
+      placeholder: |
+        Error: Process completed with exit code 1.
+        jq: parse error...
+    validations:
+      required: false
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: Paste relevant logs from the workflow run (redact sensitive info)
+      render: shell
+      placeholder: Expand the workflow step and copy relevant output
+    validations:
+      required: true
+
+  - type: textarea
+    id: outputs
+    attributes:
+      label: Workflow Outputs
+      description: What outputs did the workflow produce (if any)?
+      render: json
+      placeholder: |
+        {
+          "commit_messages": "[]"
+        }
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: prerequisites
+    attributes:
+      label: Prerequisites
+      options:
+        - label: I have [searched existing issues](https://github.com/marcus-hooper/workflows/issues?q=is%3Aissue) for duplicates
+          required: true
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional Context
+      description: Any other relevant information (screenshots, links, etc.)
+    validations:
+      required: false
