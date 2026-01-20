@@ -11,22 +11,27 @@ on:
       commit_messages:
         description: "Recent commit messages with metadata in JSON format"
         value: ${{ jobs.fetch-commits.outputs.commit_messages }}
-      
+
+permissions: {}
+
 jobs:
   fetch-commits:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     outputs:
       commit_messages: ${{ steps.extract-history.outputs.commit_messages }}
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6
         with:
           fetch-depth: ${{ inputs.commit_count }}
           
       - name: Extract commit history
         id: extract-history
+        env:
+          COMMIT_COUNT: ${{ inputs.commit_count }}
         run: |
-          COMMIT_COUNT="${{ inputs.commit_count }}"
           
           # Create a temporary file to build JSON safely
           temp_file=$(mktemp)
