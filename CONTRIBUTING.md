@@ -47,26 +47,11 @@ Before pushing, validate your workflow files:
 yq eval '.' .github/workflows/*.yml > /dev/null
 
 # GitHub Actions lint (install: https://github.com/rhysd/actionlint)
+# Includes ShellCheck integration for bash scripts in run: blocks
 actionlint
-
-# Shell script lint (install: https://github.com/koalaman/shellcheck)
-# Extract and check bash from workflows:
-for f in .github/workflows/*.yml; do
-  yq eval '.. | select(has("run")) | .run' "$f" 2>/dev/null | \
-    while IFS= read -r script; do
-      echo "#!/bin/bash"; echo "$script"
-    done | shellcheck -s bash -
-done
 ```
 
-### Quick CI Script
-
-```bash
-# All-in-one validation (stops on first failure)
-yq eval '.' .github/workflows/*.yml > /dev/null && actionlint
-```
-
-> **Tip**: The `&&` chaining stops at the first failure. To see all failures at once, run each command separately.
+> **Note**: `actionlint` automatically runs ShellCheck on embedded bash scripts when ShellCheck is installed, so separate ShellCheck invocation is unnecessary.
 
 ## Workflow Conventions
 

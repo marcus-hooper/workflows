@@ -65,30 +65,6 @@ jobs:
           done
           echo "All required tools available"
 
-      - name: Validate workflow YAML syntax
-        id: validate-yaml
-        shell: bash
-        timeout-minutes: 1
-        run: |
-          set -euo pipefail
-          exec > >(tee -a test-results/validate-yaml.log) 2>&1
-          echo "Validating workflow YAML files..."
-          errors=0
-          for file in .github/workflows/*.yml; do
-            if [[ -f "$file" ]]; then
-              echo "Checking $file..."
-              if ! yq eval '.' "$file" > /dev/null 2>&1; then
-                echo "::error file=$file::Invalid YAML syntax"
-                errors=$((errors + 1))
-              fi
-            fi
-          done
-          if [[ $errors -gt 0 ]]; then
-            echo "::error::Found $errors YAML validation error(s)"
-            exit 1
-          fi
-          echo "All workflow YAML files are valid"
-
       - name: Validate reusable workflow structure
         id: validate-reusable
         shell: bash
@@ -278,59 +254,6 @@ jobs:
           echo "Sample output:"
           echo "$commit_data" | jq '.[0]'
 
-      - name: ShellCheck embedded scripts
-        id: shellcheck
-        shell: bash
-        timeout-minutes: 2
-        run: |
-          set -euo pipefail
-          exec > >(tee -a test-results/shellcheck.log) 2>&1
-          echo "Running ShellCheck on workflow scripts..."
-          errors=0
-          warnings=0
-
-          for workflow in .github/workflows/*.yml; do
-            if [[ -f "$workflow" ]]; then
-              echo "Checking $workflow..."
-              # Extract run blocks to a temp file (one script per file, separated by null)
-              scripts_dir=$(mktemp -d)
-              script_index=0
-
-              # Use yq to extract all run blocks, writing each to a separate file
-              while IFS= read -r script; do
-                if [[ -n "$script" && "$script" != "null" ]]; then
-                  script_file="${scripts_dir}/script_${script_index}.sh"
-                  {
-                    echo "#!/bin/bash"
-                    echo "$script"
-                  } > "$script_file"
-                  script_index=$((script_index + 1))
-                fi
-              done < <(yq eval '.. | select(has("run")) | .run' "$workflow" 2>/dev/null | yq eval -o=json '.' | jq -r 'if type == "string" then . else empty end' 2>/dev/null || true)
-
-              # Run ShellCheck on each extracted script
-              for script_file in "$scripts_dir"/*.sh; do
-                [[ -f "$script_file" ]] || continue
-                # Fail on errors (error level), warn on warnings
-                if ! shellcheck -s bash -S error "$script_file" 2>&1; then
-                  echo "::error file=$workflow::ShellCheck found errors in $(basename "$script_file")"
-                  errors=$((errors + 1))
-                elif ! shellcheck -s bash -S warning "$script_file" 2>&1; then
-                  echo "::warning file=$workflow::ShellCheck found warnings in $(basename "$script_file")"
-                  warnings=$((warnings + 1))
-                fi
-              done
-
-              rm -rf "$scripts_dir"
-            fi
-          done
-
-          echo "ShellCheck complete (errors: $errors, warnings: $warnings)"
-          if [[ $errors -gt 0 ]]; then
-            echo "::error::ShellCheck found $errors error(s)"
-            exit 1
-          fi
-
       - name: Write workflow summary
         if: always()
         shell: bash
@@ -343,11 +266,9 @@ jobs:
           | Check | Status |
           |-------|--------|
           | Required tools | ${{ steps.verify-tools.outcome == 'success' && '✅ Passed' || '❌ Failed' }} |
-          | YAML validation | ${{ steps.validate-yaml.outcome == 'success' && '✅ Passed' || '❌ Failed' }} |
           | Reusable workflow structure | ${{ steps.validate-reusable.outcome == 'success' && '✅ Passed' || '❌ Failed' }} |
           | Commit extraction logic | ${{ steps.test-extraction.outcome == 'success' && '✅ Passed' || '❌ Failed' }} |
           | Actual commit extraction | ${{ steps.test-actual.outcome == 'success' && '✅ Passed' || '❌ Failed' }} |
-          | ShellCheck | ${{ steps.shellcheck.outcome == 'success' && '✅ Passed' || '❌ Failed' }} |
 
           **Workflow run:** [${{ github.run_id }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
           EOF
@@ -404,10 +325,8 @@ jobs:
 
             ## Possible Causes
             - Required tools (jq, yq, git) unavailable or changed behavior
-            - YAML syntax errors in workflow files
             - Reusable workflow structure issues
             - Commit extraction logic failures
-            - ShellCheck warnings in embedded scripts
 
             Please investigate and resolve the issue.
         run: |

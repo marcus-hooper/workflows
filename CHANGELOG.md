@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- CI workflow with CHANGELOG validation, YAML syntax checking, actionlint, and ShellCheck
+- CI workflow with CHANGELOG validation and actionlint (includes YAML and ShellCheck)
 - CodeQL workflow for static application security testing (SAST)
 - OSSF Scorecard workflow for supply chain security analysis
 - Dependabot auto-merge workflow for patch and minor updates
