@@ -1,0 +1,354 @@
+name: Scheduled Health Check
+
+on:
+  schedule:
+    # Run weekly on Monday at 6:00 UTC
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+    # Allow manual trigger for debugging
+    inputs:
+      skip_issue_creation:
+        description: "Skip creating/updating GitHub issues on failure"
+        type: boolean
+        default: false
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions: {}
+
+jobs:
+  health-check:
+    name: Workflow Health Check
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    permissions:
+      contents: read
+
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76 # v2.14.0
+        with:
+          egress-policy: block
+          allowed-endpoints: >
+            api.github.com:443
+            github.com:443
+
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 10
+          persist-credentials: false
+
+      - name: Verify required tools
+        id: verify-tools
+        run: |
+          echo "Checking required tools..."
+          for tool in jq yq git date; do
+            if ! command -v "$tool" &> /dev/null; then
+              echo "::error::Required tool '$tool' not found"
+              exit 1
+            fi
+            echo "$tool: $(command -v "$tool")"
+          done
+          echo "All required tools available"
+
+      - name: Validate workflow YAML syntax
+        id: validate-yaml
+        run: |
+          echo "Validating workflow YAML files..."
+          errors=0
+          for file in .github/workflows/*.yml; do
+            if [[ -f "$file" ]]; then
+              echo "Checking $file..."
+              if ! yq eval '.' "$file" > /dev/null 2>&1; then
+                echo "::error file=$file::Invalid YAML syntax"
+                errors=$((errors + 1))
+              fi
+            fi
+          done
+          if [[ $errors -gt 0 ]]; then
+            echo "::error::Found $errors YAML validation error(s)"
+            exit 1
+          fi
+          echo "All workflow YAML files are valid"
+
+      - name: Validate reusable workflow structure
+        id: validate-reusable
+        run: |
+          echo "Validating reusable workflow structure..."
+          workflow=".github/workflows/get-commit-messages.yml"
+
+          # Verify workflow_call trigger exists
+          if ! yq eval '.on.workflow_call' "$workflow" | grep -q "inputs"; then
+            echo "::error::Missing workflow_call trigger with inputs"
+            exit 1
+          fi
+          echo "workflow_call trigger: OK"
+
+          # Verify outputs are defined
+          if ! yq eval '.on.workflow_call.outputs.commit_messages' "$workflow" | grep -q "value"; then
+            echo "::error::Missing commit_messages output definition"
+            exit 1
+          fi
+          echo "Output definitions: OK"
+
+          # Verify job outputs are wired correctly
+          job_output=$(yq eval '.jobs.fetch-commits.outputs.commit_messages' "$workflow")
+          if [[ -z "$job_output" || "$job_output" == "null" ]]; then
+            echo "::error::Missing job output for commit_messages"
+            exit 1
+          fi
+          echo "Job outputs: OK"
+
+      - name: Test commit extraction logic
+        id: test-extraction
+        run: |
+          echo "Testing commit extraction logic..."
+
+          # Test jq JSON construction (core of the workflow)
+          temp_file=$(mktemp)
+          echo "[]" > "$temp_file"
+
+          # Simulate adding commit data
+          jq --arg title "1m ago" \
+             --arg value "[Test commit](https://github.com/test/repo/commit/abc123) (author)" \
+             '. += [{"title": $title, "value": $value}]' \
+             "$temp_file" > "${temp_file}.tmp" && mv "${temp_file}.tmp" "$temp_file"
+
+          # Verify JSON is valid
+          if ! jq -e '.' "$temp_file" > /dev/null 2>&1; then
+            echo "::error::JSON construction test failed"
+            rm -f "$temp_file"
+            exit 1
+          fi
+
+          # Verify structure
+          count=$(jq '. | length' "$temp_file")
+          if [[ "$count" -ne 1 ]]; then
+            echo "::error::Expected 1 item, got $count"
+            rm -f "$temp_file"
+            exit 1
+          fi
+          echo "JSON construction: OK"
+          rm -f "$temp_file"
+
+          # Test time-ago calculation
+          now=$(date -u +"%s")
+          test_date=$(date -u -d "5 minutes ago" +"%Y-%m-%d %H:%M:%S %z" 2>/dev/null || date -u +"%Y-%m-%d %H:%M:%S %z")
+          commit_sec=$(date -u -d "$test_date" +"%s" 2>/dev/null || echo "$now")
+          diff=$((now - commit_sec))
+
+          if [[ $diff -lt 0 ]]; then
+            echo "::error::Time calculation produced negative value"
+            exit 1
+          fi
+          echo "Time-ago calculation: OK"
+
+      - name: Test actual commit extraction
+        id: test-actual
+        run: |
+          echo "Testing actual commit extraction from repository..."
+
+          # Run the extraction logic from the workflow
+          COMMIT_COUNT=5
+          temp_file=$(mktemp)
+          echo "[]" > "$temp_file"
+
+          git log -n "$COMMIT_COUNT" --no-decorate --pretty=format:'%H%n%ci%n%s%n%an%n---COMMIT-END---' | \
+          while IFS= read -r line; do
+            if [ "$line" = "---COMMIT-END---" ]; then
+              if [ -n "$sha" ] && [ -n "$date" ] && [ -n "$msg" ] && [ -n "$author" ]; then
+                now=$(date -u +"%s")
+                commit_sec=$(date -u -d "$date" +"%s" 2>/dev/null || echo "$now")
+                diff=$((now - commit_sec))
+
+                if [ $diff -lt 60 ]; then
+                  ago="${diff}s ago"
+                elif [ $diff -lt 3600 ]; then
+                  ago="$((diff/60))m ago"
+                elif [ $diff -lt 86400 ]; then
+                  ago="$((diff/3600))h ago"
+                else
+                  ago="$((diff/86400))d ago"
+                fi
+
+                jq --arg title "$ago" \
+                   --arg value "[${msg}](https://github.com/${GITHUB_REPOSITORY}/commit/${sha}) ($author)" \
+                   '. += [{"title": $title, "value": $value}]' \
+                   "$temp_file" > "${temp_file}.tmp" && mv "${temp_file}.tmp" "$temp_file"
+              fi
+              sha=""
+              date=""
+              msg=""
+              author=""
+              line_count=0
+            else
+              line_count=$((line_count + 1))
+              case $line_count in
+                1) sha="$line" ;;
+                2) date="$line" ;;
+                3) msg="$line" ;;
+                4) author="$line" ;;
+                *) msg="${msg}${line}" ;;
+              esac
+            fi
+          done
+
+          # Verify output
+          commit_data=$(cat "$temp_file" | jq -c .)
+          rm -f "$temp_file" "${temp_file}.tmp"
+
+          if [[ -z "$commit_data" || "$commit_data" == "null" ]]; then
+            echo "::error::Commit extraction produced no output"
+            exit 1
+          fi
+
+          count=$(echo "$commit_data" | jq '. | length')
+          echo "Extracted $count commits"
+          echo "Sample output:"
+          echo "$commit_data" | jq '.[0]'
+
+      - name: ShellCheck embedded scripts
+        id: shellcheck
+        run: |
+          echo "Running ShellCheck on workflow scripts..."
+          warnings=0
+
+          for workflow in .github/workflows/*.yml; do
+            if [[ -f "$workflow" ]]; then
+              # Extract run blocks
+              yq eval '.. | select(has("run")) | .run' "$workflow" 2>/dev/null | while IFS= read -r -d '' script || [[ -n "$script" ]]; do
+                if [[ -n "$script" && "$script" != "---" && "$script" != "null" ]]; then
+                  temp_script=$(mktemp --suffix=.sh)
+                  echo "#!/bin/bash" > "$temp_script"
+                  echo "$script" >> "$temp_script"
+
+                  if ! shellcheck -s bash -S warning "$temp_script" 2>/dev/null; then
+                    echo "::warning file=$workflow::ShellCheck found issues"
+                    warnings=$((warnings + 1))
+                  fi
+                  rm -f "$temp_script"
+                fi
+              done
+            fi
+          done
+
+          echo "ShellCheck complete (warnings: $warnings)"
+
+      - name: Write workflow summary
+        if: always()
+        run: |
+          cat >> "$GITHUB_STEP_SUMMARY" << 'EOF'
+          ## Health Check Results
+
+          | Check | Status |
+          |-------|--------|
+          | Required tools | ${{ steps.verify-tools.outcome == 'success' && '✅ Passed' || '❌ Failed' }} |
+          | YAML validation | ${{ steps.validate-yaml.outcome == 'success' && '✅ Passed' || '❌ Failed' }} |
+          | Reusable workflow structure | ${{ steps.validate-reusable.outcome == 'success' && '✅ Passed' || '❌ Failed' }} |
+          | Commit extraction logic | ${{ steps.test-extraction.outcome == 'success' && '✅ Passed' || '❌ Failed' }} |
+          | Actual commit extraction | ${{ steps.test-actual.outcome == 'success' && '✅ Passed' || '❌ Failed' }} |
+          | ShellCheck | ${{ steps.shellcheck.outcome == 'success' && '✅ Passed' || '❌ Failed' }} |
+
+          **Workflow run:** [${{ github.run_id }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
+          EOF
+
+  # Notify on failure by creating a GitHub issue
+  notify-failure:
+    name: Notify on Failure
+    runs-on: ubuntu-latest
+    needs: health-check
+    if: failure() && (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && !inputs.skip_issue_creation))
+    timeout-minutes: 5
+
+    permissions:
+      issues: write
+
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76 # v2.14.0
+        with:
+          egress-policy: block
+          allowed-endpoints: >
+            api.github.com:443
+
+      - name: Ensure status:health-check-failure label exists
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          gh label create "status:health-check-failure" --description "Automated health check detected a failure" --color "d73a4a" --force
+
+      - name: Create failure issue
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          ISSUE_BODY: |
+            The scheduled health check workflow failed.
+
+            ## Details
+            - **Workflow:** Scheduled Health Check
+            - **Run URL:** ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+            ## Possible Causes
+            - Required tools (jq, yq, git) unavailable or changed behavior
+            - YAML syntax errors in workflow files
+            - Reusable workflow structure issues
+            - Commit extraction logic failures
+            - ShellCheck warnings in embedded scripts
+
+            Please investigate and resolve the issue.
+        run: |
+          set -euo pipefail
+          # Check for existing open issue to avoid duplicates
+          EXISTING=$(gh issue list --label "status:health-check-failure" --state open --json number --jq '.[0].number // empty')
+
+          if [[ -n "$EXISTING" ]]; then
+            echo "Existing issue #$EXISTING found, adding comment"
+            gh issue comment "$EXISTING" --body "Health check failed again on $(date -u '+%Y-%m-%d %H:%M UTC'). [View workflow run]($RUN_URL)"
+          else
+            echo "Creating new failure issue"
+            gh issue create \
+              --title "Scheduled health check failed" \
+              --label "status:health-check-failure,type:bug" \
+              --body "$ISSUE_BODY"
+          fi
+
+  # Auto-close failure issues when health check passes
+  notify-success:
+    name: Close Stale Failure Issues
+    runs-on: ubuntu-latest
+    needs: health-check
+    if: success() && (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && !inputs.skip_issue_creation))
+    timeout-minutes: 5
+
+    permissions:
+      issues: write
+
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76 # v2.14.0
+        with:
+          egress-policy: block
+          allowed-endpoints: >
+            api.github.com:443
+
+      - name: Close stale failure issues
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          issues=$(gh issue list --label "status:health-check-failure" --state open --json number --jq '.[].number' || true)
+          if [[ -n "$issues" ]]; then
+            while read -r issue; do
+              echo "Closing issue #$issue"
+              gh issue close "$issue" --comment "Health check is passing again as of $(date -u '+%Y-%m-%d %H:%M UTC'). Closing automatically."
+            done <<< "$issues"
+          fi
+          echo "Done processing stale failure issues"

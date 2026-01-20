@@ -1,0 +1,305 @@
+name: Security
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - '.github/*.md'
+  pull_request:
+    branches: [main]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - '.github/*.md'
+  schedule:
+    - cron: '0 6 * * 3'  # Weekly on Wednesday 6am UTC
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false  # Security scans should always complete
+
+permissions: {}
+
+jobs:
+  # Scan dependencies for known vulnerabilities on PRs
+  dependency-review:
+    name: Dependency Review
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    if: github.event_name == 'pull_request'
+
+    permissions:
+      contents: read
+      pull-requests: write
+
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76 # v2.14.0
+        with:
+          egress-policy: block
+          allowed-endpoints: >
+            api.github.com:443
+            github.com:443
+
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Dependency Review
+        uses: actions/dependency-review-action@3c4e3dcb1aa7874d2c16be7d79418e9b7efd6261 # v4.7.1
+        with:
+          config-file: .github/dependency-review-config.yml
+
+  # Secret scanning using Gitleaks
+  secret-scanning:
+    name: Secret Scanning
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    permissions:
+      contents: read
+      security-events: write
+
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76 # v2.14.0
+        with:
+          egress-policy: block
+          allowed-endpoints: >
+            api.github.com:443
+            github.com:443
+            github-releases.githubusercontent.com:443
+            objects.githubusercontent.com:443
+            release-assets.githubusercontent.com:443
+            uploads.github.com:443
+
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+          fetch-depth: 0  # Full history for comprehensive secret scanning
+
+      - name: Run Gitleaks
+        uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7 # v2.3.9
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # Static analysis for bash scripts
+  script-security:
+    name: Script Security Check
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    permissions:
+      contents: read
+      security-events: write
+
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76 # v2.14.0
+        with:
+          egress-policy: block
+          allowed-endpoints: >
+            api.github.com:443
+            github.com:443
+            uploads.github.com:443
+
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Check for hardcoded secrets
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          declare -A patterns=(
+            ["password\s*=\s*['\"][^'\"]+['\"]"]="Hardcoded password"
+            ["api[_-]?key\s*=\s*['\"][^'\"]+['\"]"]="Hardcoded API key"
+            ["secret\s*=\s*['\"][^'\"]+['\"]"]="Hardcoded secret"
+            ["token\s*=\s*['\"][^'\"]+['\"]"]="Hardcoded token"
+            ["AKIA[0-9A-Z]{16}"]="AWS Access Key ID"
+            ["-----BEGIN\s+(RSA|DSA|EC|OPENSSH|PGP)?\s*PRIVATE KEY-----"]="Private key"
+            ["ghp_[0-9a-zA-Z]{36}"]="GitHub personal access token"
+            ["gho_[0-9a-zA-Z]{36}"]="GitHub OAuth access token"
+            ["ghu_[0-9a-zA-Z]{36}"]="GitHub user-to-server token"
+            ["ghs_[0-9a-zA-Z]{36}"]="GitHub server-to-server token"
+            ["ghr_[0-9a-zA-Z]{36}"]="GitHub refresh token"
+            ["github_pat_[0-9a-zA-Z]{22}_[0-9a-zA-Z]{59}"]="GitHub fine-grained PAT"
+            ["xox[baprs]-[0-9a-zA-Z-]+"]="Slack token"
+            ["https://[^/]*\.webhook\.office\.com/webhookb2/[a-zA-Z0-9-]+"]="Teams webhook URL"
+          )
+
+          issues=0
+
+          for pattern in "${!patterns[@]}"; do
+            description="${patterns[$pattern]}"
+            # Search in workflow files, excluding this security workflow's pattern definitions
+            while IFS= read -r match; do
+              if [[ -n "$match" ]]; then
+                file=$(echo "$match" | cut -d: -f1)
+                # Skip this file's pattern definitions
+                if [[ "$file" == ".github/workflows/security.yml" ]]; then
+                  continue
+                fi
+                echo "::warning file=$file::$description"
+                ((issues++)) || true
+              fi
+            done < <(grep -rEn "$pattern" .github/workflows/ --include="*.yml" --include="*.yaml" 2>/dev/null || true)
+          done
+
+          if [[ $issues -gt 0 ]]; then
+            echo "::error::Found $issues potential hardcoded secret(s)"
+            exit 1
+          fi
+
+          echo "No hardcoded secrets detected"
+
+      - name: Check for unsafe bash patterns
+        id: unsafe-patterns
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # Patterns that indicate potentially unsafe bash code
+          declare -A unsafe_patterns=(
+            ['\beval\s']="eval can execute arbitrary code"
+            ['\bcurl\s.*\|\s*(bash|sh)']="Piping curl to shell is dangerous"
+            ['\bwget\s.*\|\s*(bash|sh)']="Piping wget to shell is dangerous"
+            ['source\s+<\(']="Process substitution with source can be unsafe"
+            ['\$\(\s*cat\s']="Command substitution with cat may indicate code injection"
+            ['rm\s+-rf\s+/[^.]']="Dangerous recursive delete from root"
+            ['chmod\s+777']="World-writable permissions are insecure"
+            ['\bdd\s+.*of=/dev/']="Direct device writes are dangerous"
+          )
+
+          # Allow-list: file:pattern pairs for known-safe usages
+          declare -A allow_list=(
+            # Add exceptions here as needed
+            # [".github/workflows/example.yml:eval"]="1"
+          )
+
+          issues=0
+          sarif_results="[]"
+
+          for pattern in "${!unsafe_patterns[@]}"; do
+            description="${unsafe_patterns[$pattern]}"
+
+            while IFS=: read -r file line_num content; do
+              if [[ -n "$file" && -n "$line_num" ]]; then
+                # Check allow-list
+                allow_key="$file:$(echo "$pattern" | sed 's/\\b//g' | cut -c1-20)"
+                if [[ -n "${allow_list[$allow_key]:-}" ]]; then
+                  continue
+                fi
+
+                # Skip this file's pattern definitions
+                if [[ "$file" == ".github/workflows/security.yml" ]]; then
+                  continue
+                fi
+
+                echo "::error file=$file,line=$line_num::$description"
+                ((issues++)) || true
+
+                # Build SARIF result
+                sarif_results=$(echo "$sarif_results" | jq --arg file "$file" \
+                  --arg line "$line_num" \
+                  --arg desc "$description" \
+                  '. += [{
+                    "ruleId": "unsafe-bash-pattern",
+                    "level": "warning",
+                    "message": {"text": $desc},
+                    "locations": [{
+                      "physicalLocation": {
+                        "artifactLocation": {"uri": $file},
+                        "region": {"startLine": ($line | tonumber)}
+                      }
+                    }]
+                  }]')
+              fi
+            done < <(grep -rEn "$pattern" .github/workflows/ --include="*.yml" --include="*.yaml" 2>/dev/null || true)
+          done
+
+          # Generate SARIF output
+          sarif=$(jq -n --argjson results "$sarif_results" '{
+            "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
+            "version": "2.1.0",
+            "runs": [{
+              "tool": {
+                "driver": {
+                  "name": "Bash Security Scanner",
+                  "version": "1.0.0",
+                  "rules": [{
+                    "id": "unsafe-bash-pattern",
+                    "name": "UnsafeBashPattern",
+                    "shortDescription": {"text": "Potentially unsafe bash pattern detected"},
+                    "defaultConfiguration": {"level": "warning"}
+                  }]
+                }
+              },
+              "results": $results
+            }]
+          }')
+
+          echo "$sarif" > security-results.sarif
+
+          if [[ $issues -gt 0 ]]; then
+            echo "::error::Found $issues potentially unsafe pattern(s)"
+            echo "If these are intentional, add them to the allow-list in this workflow."
+            exit 1
+          else
+            echo "No unsafe patterns detected"
+          fi
+
+      - name: Run ShellCheck
+        run: |
+          # Extract bash scripts from workflow files and check them
+          echo "Running ShellCheck on embedded bash scripts..."
+
+          issues=0
+
+          for workflow in .github/workflows/*.yml .github/workflows/*.yaml; do
+            [[ -f "$workflow" ]] || continue
+
+            # Extract run steps and check with shellcheck
+            # Using yq to extract bash/shell run blocks
+            if command -v yq &> /dev/null; then
+              yq eval '.. | select(has("run")) | .run' "$workflow" 2>/dev/null | \
+              while IFS= read -r script; do
+                if [[ -n "$script" && "$script" != "null" ]]; then
+                  echo "$script" | shellcheck -s bash - 2>&1 | while read -r line; do
+                    if [[ "$line" == *"error"* ]] || [[ "$line" == *"warning"* ]]; then
+                      echo "::warning file=$workflow::ShellCheck: $line"
+                      ((issues++)) || true
+                    fi
+                  done
+                fi
+              done
+            else
+              echo "yq not available, running basic shellcheck on workflow"
+              shellcheck --shell=bash -e SC1091,SC2086 -x "$workflow" 2>&1 || true
+            fi
+          done
+
+          echo "ShellCheck analysis complete"
+
+      - name: Upload SARIF results
+        uses: github/codeql-action/upload-sarif@1ec7dd2bc4c2d5776ab565aa07221b7432e62cc7 # v4
+        if: always()
+        with:
+          sarif_file: security-results.sarif
+          category: bash-security
+        continue-on-error: true  # Don't fail if SARIF upload fails (e.g., on forks)
+
+      - name: Upload security report artifact
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        if: always()
+        with:
+          name: bash-security-report
+          path: security-results.sarif
+          if-no-files-found: ignore

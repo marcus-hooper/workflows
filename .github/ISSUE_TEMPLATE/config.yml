@@ -1,0 +1,14 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security Vulnerability
+    url: https://github.com/marcus-hooper/workflows/security/advisories/new
+    about: Report security vulnerabilities privately (do not open public issues)
+  - name: Search Existing Issues
+    url: https://github.com/marcus-hooper/workflows/issues?q=is%3Aissue
+    about: Check if your issue has already been reported
+  - name: Documentation
+    url: https://github.com/marcus-hooper/workflows#readme
+    about: Check the README for usage examples and troubleshooting
+  - name: Releases & Changelog
+    url: https://github.com/marcus-hooper/workflows/releases
+    about: Check if your issue was addressed in a recent release

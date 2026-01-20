@@ -1,0 +1,163 @@
+name: CI
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths-ignore: &paths-ignore
+      - '**.md'
+      - 'docs/**'
+      - '.github/*.md'
+      - '.github/ISSUE_TEMPLATE/**'
+      - 'LICENSE'
+  pull_request:
+    branches: [main]
+    paths-ignore: *paths-ignore
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  validate-changelog:
+    name: Validate CHANGELOG
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76 # v2.14.0
+        with:
+          egress-policy: block
+          allowed-endpoints: >
+            api.github.com:443
+            github.com:443
+
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Validate CHANGELOG format
+        run: |
+          echo "Validating CHANGELOG.md format..."
+          if [[ ! -f CHANGELOG.md ]]; then
+            echo "::error::CHANGELOG.md not found"
+            exit 1
+          fi
+          if ! grep -qE "^## \[Unreleased\]" CHANGELOG.md; then
+            echo "::error::CHANGELOG.md missing '## [Unreleased]' section"
+            exit 1
+          fi
+          echo "CHANGELOG.md format valid"
+
+  validate-yaml:
+    name: Validate YAML
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76 # v2.14.0
+        with:
+          egress-policy: block
+          allowed-endpoints: >
+            api.github.com:443
+            github.com:443
+
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Validate workflow YAML syntax
+        run: |
+          echo "Validating workflow YAML files..."
+          errors=0
+          for file in .github/workflows/*.yml; do
+            if [[ -f "$file" ]]; then
+              echo "Checking $file..."
+              if ! yq eval '.' "$file" > /dev/null 2>&1; then
+                echo "::error file=$file::Invalid YAML syntax"
+                errors=$((errors + 1))
+              fi
+            fi
+          done
+          if [[ $errors -gt 0 ]]; then
+            echo "::error::Found $errors YAML validation error(s)"
+            exit 1
+          fi
+          echo "All workflow YAML files are valid"
+
+  shellcheck:
+    name: ShellCheck
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76 # v2.14.0
+        with:
+          egress-policy: block
+          allowed-endpoints: >
+            api.github.com:443
+            github.com:443
+
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Extract and lint bash scripts from workflows
+        run: |
+          echo "Extracting and linting bash scripts from workflow files..."
+          errors=0
+
+          for workflow in .github/workflows/*.yml; do
+            if [[ -f "$workflow" ]]; then
+              echo "Processing $workflow..."
+
+              # Extract bash/shell run blocks using yq
+              # Get all run steps that use bash or default shell
+              script_count=$(yq eval '.. | select(has("run")) | .run' "$workflow" 2>/dev/null | grep -c "^" || echo "0")
+
+              if [[ "$script_count" -gt 0 ]]; then
+                # Extract each run block and check with shellcheck
+                yq eval '.. | select(has("run")) | .run' "$workflow" 2>/dev/null | while IFS= read -r line; do
+                  if [[ -n "$line" && "$line" != "---" && "$line" != "null" ]]; then
+                    # Create temp file for shellcheck
+                    temp_script=$(mktemp --suffix=.sh)
+                    echo "#!/bin/bash" > "$temp_script"
+                    echo "$line" >> "$temp_script"
+
+                    if ! shellcheck -s bash -S warning "$temp_script" 2>/dev/null; then
+                      echo "::warning file=$workflow::ShellCheck found issues in a run block"
+                    fi
+                    rm -f "$temp_script"
+                  fi
+                done
+              fi
+            fi
+          done
+
+          echo "ShellCheck analysis complete"
+
+  ci-status:
+    name: CI Status
+    runs-on: ubuntu-latest
+    if: always()
+    needs: [validate-changelog, validate-yaml, shellcheck]
+
+    steps:
+      - name: Check CI status
+        run: |
+          if [[ "${{ needs.validate-changelog.result }}" != "success" ]] || \
+             [[ "${{ needs.validate-yaml.result }}" != "success" ]] || \
+             [[ "${{ needs.shellcheck.result }}" != "success" ]]; then
+            echo "::error::One or more CI jobs failed"
+            exit 1
+          fi
+          echo "All CI jobs passed successfully"

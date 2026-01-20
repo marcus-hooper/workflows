@@ -1,0 +1,125 @@
+name: Scorecard
+
+on:
+  schedule:
+    - cron: '0 6 * * 1'  # Weekly on Monday 6am UTC
+  push:
+    branches: [main]
+    paths-ignore:
+      - 'docs/**'
+      - '.github/*.md'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# Minimum permissions at workflow level; job-level permissions grant only what's needed
+permissions: {}
+
+jobs:
+  # Job 1: Run Scorecard and publish to OpenSSF (requires uses-only steps)
+  # Note: Scorecard only runs on the main repository, not forks (forks lack required permissions)
+  analysis:
+    if: ${{ !github.event.repository.fork }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read          # Required for checkout
+      id-token: write         # Publish results to OpenSSF
+      actions: read           # Required for Scorecard GraphQL queries in private repos
+      issues: read            # Required for GraphQL ListCommits on private repos
+      pull-requests: read     # Required for GraphQL ListCommits on private repos
+      checks: read            # Required for GraphQL queries on private repos
+
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76  # v2.14.0
+        with:
+          egress-policy: block
+          allowed-endpoints: >
+            api.deps.dev:443
+            api.github.com:443
+            api.osv.dev:443
+            api.scorecard.dev:443
+            api.securityscorecards.dev:443
+            fulcio.sigstore.dev:443
+            github.com:443
+            objects.githubusercontent.com:443
+            oss-fuzz-build-logs.storage.googleapis.com:443
+            rekor.sigstore.dev:443
+            tuf-repo-cdn.sigstore.dev:443
+            www.bestpractices.dev:443
+
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Run Scorecard
+        uses: ossf/scorecard-action@4eaacf0543bb3f2c246792bd56e8cdeffafb205a  # v2.4.3
+        with:
+          results_file: results.sarif
+          results_format: sarif
+          publish_results: true
+
+      - name: Upload SARIF artifact
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6.0.0
+        with:
+          name: scorecard-sarif
+          path: results.sarif
+          retention-days: 14
+
+  # Job 2: Process SARIF and upload to GitHub Code Scanning (allows run steps)
+  upload:
+    if: always() && needs.analysis.result == 'success'
+    runs-on: ubuntu-24.04
+    needs: analysis
+    timeout-minutes: 5
+    permissions:
+      contents: read          # Required for codeql-action to identify repository context
+      security-events: write  # Upload SARIF results
+      actions: read           # Required for codeql-action to get workflow run info
+
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76  # v2.14.0
+        with:
+          egress-policy: block
+          allowed-endpoints: >
+            api.github.com:443
+            github.com:443
+            uploads.github.com:443
+
+      - name: Download SARIF artifact
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131  # v7.0.0
+        with:
+          name: scorecard-sarif
+
+      - name: Add SARIF summary
+        run: |
+          set -euo pipefail
+
+          # Write workflow summary for GitHub Actions UI
+          {
+            echo "## Scorecard Analysis Complete"
+            echo ""
+            echo "Results uploaded to the **Code Scanning** tab."
+            echo ""
+            echo "Scorecard evaluates repository security posture across 18 checks including:"
+            echo "- Branch protection"
+            echo "- Dependency management"
+            echo "- CI/CD security"
+            echo "- Vulnerability disclosure"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          # Add a summary note to the first SARIF run's invocations, preserving any existing invocation data.
+          jq '.runs[0].invocations = (.runs[0].invocations // []) + [{"executionSuccessful": true, "toolExecutionNotifications": [{"level": "note", "message": {"text": "Scorecard evaluated repository security posture across 18 checks including branch protection, dependency management, CI/CD security, and vulnerability disclosure."}, "descriptor": {"id": "scanned-files-summary"}}]}]' \
+            results.sarif > results.tmp
+          mv results.tmp results.sarif
+
+      - name: Upload to Code Scanning
+        uses: github/codeql-action/upload-sarif@fb650c22f965a3eff7e20c5535e51a256dd16bf1  # v4
+        with:
+          sarif_file: results.sarif
+          category: scorecard
