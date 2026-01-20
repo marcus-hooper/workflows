@@ -4,6 +4,8 @@
 [![CodeQL](https://github.com/marcus-hooper/workflows/actions/workflows/codeql.yml/badge.svg)](https://github.com/marcus-hooper/workflows/actions/workflows/codeql.yml)
 [![Security](https://github.com/marcus-hooper/workflows/actions/workflows/security.yml/badge.svg)](https://github.com/marcus-hooper/workflows/actions/workflows/security.yml)
 [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/marcus-hooper/workflows/badge)](https://scorecard.dev/viewer/?uri=github.com/marcus-hooper/workflows)
+[![GitHub release](https://img.shields.io/github/v/release/marcus-hooper/workflows)](https://github.com/marcus-hooper/workflows/releases)
+[![GitHub Actions](https://img.shields.io/badge/GitHub_Actions-2088FF?logo=githubactions&logoColor=white)](https://docs.github.com/en/actions)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 Reusable GitHub Actions workflows for Teams notifications and CI/CD utilities.
@@ -99,6 +101,30 @@ jobs:
 4. Builds JSON array using `jq` for safe character escaping
 5. Outputs JSON via `GITHUB_OUTPUT` heredoc syntax
 
+## Sample Workflow Logs
+
+When the workflow runs successfully, you'll see output similar to:
+
+```
+Run git log -n 5 --format='%H|%ct|%s|%an'
+abc1234...|1737312000|Fix authentication bug|Alice
+def5678...|1737225600|Add new feature|Bob
+...
+
+Processing 5 commits...
+Building JSON array with jq...
+Writing output to GITHUB_OUTPUT
+```
+
+The `commit_messages` output will contain:
+
+```json
+[
+  {"title": "2h ago", "value": "[Fix authentication bug](https://github.com/owner/repo/commit/abc1234) (Alice)"},
+  {"title": "1d ago", "value": "[Add new feature](https://github.com/owner/repo/commit/def5678) (Bob)"}
+]
+```
+
 ## Requirements
 
 - Runs on `ubuntu-latest`
@@ -159,6 +185,30 @@ workflows/
 ├── README.md                       # This file
 └── SECURITY.md                     # Security policy
 ```
+
+## Development
+
+### Requirements
+
+- `yq` - YAML parsing and validation
+- `actionlint` - GitHub Actions workflow linter (includes ShellCheck)
+
+### Validation
+
+```bash
+# Validate YAML syntax
+yq eval '.' .github/workflows/*.yml > /dev/null
+
+# Lint workflows (recommended - includes ShellCheck integration)
+actionlint
+
+# Validate CHANGELOG format
+grep -qE "^## \[Unreleased\]" CHANGELOG.md && echo "OK" || echo "Missing [Unreleased]"
+```
+
+### Local Testing
+
+For basic local testing, use [nektos/act](https://github.com/nektos/act). Note that some features (secrets, OIDC) require a real GitHub environment.
 
 ## Contributing
 
