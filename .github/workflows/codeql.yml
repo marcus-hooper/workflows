@@ -2,6 +2,8 @@
 #
 # Scope: Analyzes GitHub Actions workflow files (YAML) only.
 # Note: Bash scripts are NOT analyzed by CodeQL (unsupported language).
+#       Bash script security is handled by ShellCheck (ci.yml) and
+#       custom security checks (security.yml).
 
 name: CodeQL
 
@@ -54,6 +56,10 @@ jobs:
         with:
           persist-credentials: false
 
+      # Scope: This workflow only analyzes GitHub Actions workflows (YAML files).
+      # CodeQL does not support bash - bash scripts are analyzed by:
+      # - ShellCheck in ci.yml (lint and security rules)
+      # - Custom security checks in security.yml (hardcoded secrets, unsafe patterns)
       - name: Initialize CodeQL
         uses: github/codeql-action/init@1ec7dd2bc4c2d5776ab565aa07221b7432e62cc7 # v4
         with:
@@ -64,9 +70,10 @@ jobs:
         uses: github/codeql-action/analyze@1ec7dd2bc4c2d5776ab565aa07221b7432e62cc7 # v4
         with:
           category: "/language:actions"
+          fail-on: error
 
       - name: Summary
-        if: always()
+        if: success()
         run: |
           echo "## CodeQL Analysis Complete" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY

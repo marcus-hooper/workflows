@@ -42,6 +42,7 @@ jobs:
           egress-policy: block
           allowed-endpoints: >
             api.github.com:443
+            api.securityscorecards.dev:443
             github.com:443
 
       - name: Checkout
@@ -83,10 +84,41 @@ jobs:
           persist-credentials: false
           fetch-depth: 0  # Full history for comprehensive secret scanning
 
+      - name: Install Gitleaks
+        run: |
+          GITLEAKS_VERSION="8.24.0"
+          GITLEAKS_CHECKSUM="cb49b7de5ee986510fe8666ca0273a6cc15eb82571f2f14832c9e8920751f3a4"
+          curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" -o gitleaks.tar.gz
+          echo "${GITLEAKS_CHECKSUM}  gitleaks.tar.gz" | sha256sum -c -
+          tar -xzf gitleaks.tar.gz
+          chmod +x gitleaks
+          sudo mv gitleaks /usr/local/bin/
+          rm gitleaks.tar.gz
+
       - name: Run Gitleaks
-        uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7 # v2.3.9
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set +e
+          gitleaks detect --source . --report-format sarif --report-path gitleaks-results.sarif --exit-code 1
+          exit_code=$?
+          set -e
+
+          if [[ $exit_code -eq 1 ]]; then
+            echo "::error::Gitleaks detected secrets in the repository"
+            exit 1
+          elif [[ $exit_code -ne 0 ]]; then
+            echo "::error::Gitleaks encountered an error (exit code: $exit_code)"
+            exit $exit_code
+          fi
+
+          echo "No secrets detected"
+
+      - name: Upload SARIF results
+        uses: github/codeql-action/upload-sarif@1ec7dd2bc4c2d5776ab565aa07221b7432e62cc7 # v4
+        if: always()
+        with:
+          sarif_file: gitleaks-results.sarif
+          category: gitleaks
+        continue-on-error: true  # Don't fail if SARIF upload fails (e.g., on forks)
 
   # Static analysis for bash scripts
   script-security:
@@ -113,7 +145,11 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Initialize findings directory
+        run: mkdir -p findings
+
       - name: Check for hardcoded secrets
+        id: hardcoded-secrets
         shell: bash
         run: |
           set -euo pipefail
@@ -136,29 +172,48 @@ jobs:
           )
 
           issues=0
+          findings="[]"
 
           for pattern in "${!patterns[@]}"; do
             description="${patterns[$pattern]}"
             # Search in workflow files, excluding this security workflow's pattern definitions
-            while IFS= read -r match; do
-              if [[ -n "$match" ]]; then
-                file=$(echo "$match" | cut -d: -f1)
+            while IFS=: read -r file line_num content; do
+              if [[ -n "$file" && -n "$line_num" ]]; then
                 # Skip this file's pattern definitions
                 if [[ "$file" == ".github/workflows/security.yml" ]]; then
                   continue
                 fi
-                echo "::warning file=$file::$description"
+                echo "::warning file=$file,line=$line_num::$description"
                 ((issues++)) || true
+
+                # Add to findings
+                findings=$(echo "$findings" | jq --arg file "$file" \
+                  --arg line "$line_num" \
+                  --arg desc "$description" \
+                  --arg rule "hardcoded-secret" \
+                  '. += [{
+                    "ruleId": $rule,
+                    "level": "error",
+                    "message": {"text": $desc},
+                    "locations": [{
+                      "physicalLocation": {
+                        "artifactLocation": {"uri": $file},
+                        "region": {"startLine": ($line | tonumber)}
+                      }
+                    }]
+                  }]')
               fi
             done < <(grep -rEn "$pattern" .github/workflows/ --include="*.yml" --include="*.yaml" 2>/dev/null || true)
           done
 
+          echo "$findings" > findings/hardcoded-secrets.json
+          echo "issues=$issues" >> "$GITHUB_OUTPUT"
+
           if [[ $issues -gt 0 ]]; then
             echo "::error::Found $issues potential hardcoded secret(s)"
-            exit 1
+          else
+            echo "No hardcoded secrets detected"
           fi
-
-          echo "No hardcoded secrets detected"
 
       - name: Check for unsafe bash patterns
         id: unsafe-patterns
@@ -185,7 +240,7 @@ jobs:
           )
 
           issues=0
-          sarif_results="[]"
+          findings="[]"
 
           for pattern in "${!unsafe_patterns[@]}"; do
             description="${unsafe_patterns[$pattern]}"
@@ -206,12 +261,13 @@ jobs:
                 echo "::error file=$file,line=$line_num::$description"
                 ((issues++)) || true
 
-                # Build SARIF result
-                sarif_results=$(echo "$sarif_results" | jq --arg file "$file" \
+                # Add to findings
+                findings=$(echo "$findings" | jq --arg file "$file" \
                   --arg line "$line_num" \
                   --arg desc "$description" \
+                  --arg rule "unsafe-bash-pattern" \
                   '. += [{
-                    "ruleId": "unsafe-bash-pattern",
+                    "ruleId": $rule,
                     "level": "warning",
                     "message": {"text": $desc},
                     "locations": [{
@@ -225,8 +281,89 @@ jobs:
             done < <(grep -rEn "$pattern" .github/workflows/ --include="*.yml" --include="*.yaml" 2>/dev/null || true)
           done
 
-          # Generate SARIF output
-          sarif=$(jq -n --argjson results "$sarif_results" '{
+          echo "$findings" > findings/unsafe-patterns.json
+          echo "issues=$issues" >> "$GITHUB_OUTPUT"
+
+          if [[ $issues -gt 0 ]]; then
+            echo "::error::Found $issues potentially unsafe pattern(s)"
+            echo "If these are intentional, add them to the allow-list in this workflow."
+          else
+            echo "No unsafe patterns detected"
+          fi
+
+      - name: Run ShellCheck
+        id: shellcheck
+        run: |
+          set -euo pipefail
+          echo "Running ShellCheck on shell scripts..."
+
+          shopt -s nullglob globstar
+          scripts=(./**/*.sh)
+
+          if [[ ${#scripts[@]} -eq 0 ]]; then
+            echo "No standalone shell scripts found"
+            echo "[]" > findings/shellcheck.json
+            echo "issues=0" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "Found ${#scripts[@]} shell script(s)"
+
+          # Run shellcheck with JSON output, capture results even on findings
+          set +e
+          shellcheck --severity=warning --format=json "${scripts[@]}" > shellcheck-raw.json 2>/dev/null
+          sc_exit=$?
+          set -e
+
+          # Convert ShellCheck JSON to our findings format
+          if [[ -s shellcheck-raw.json ]]; then
+            jq '[.[] | {
+              ruleId: ("SC" + (.code | tostring)),
+              level: (if .level == "error" then "error" elif .level == "warning" then "warning" else "note" end),
+              message: {text: .message},
+              locations: [{
+                physicalLocation: {
+                  artifactLocation: {uri: .file},
+                  region: {
+                    startLine: .line,
+                    startColumn: .column,
+                    endLine: .endLine,
+                    endColumn: .endColumn
+                  }
+                }
+              }]
+            }]' shellcheck-raw.json > findings/shellcheck.json
+            issues=$(jq 'length' findings/shellcheck.json)
+          else
+            echo "[]" > findings/shellcheck.json
+            issues=0
+          fi
+
+          echo "issues=$issues" >> "$GITHUB_OUTPUT"
+          rm -f shellcheck-raw.json
+
+          if [[ $issues -gt 0 ]]; then
+            echo "::warning::ShellCheck found $issues issue(s)"
+          else
+            echo "ShellCheck analysis complete - no issues"
+          fi
+
+      - name: Generate combined SARIF report
+        if: always()
+        run: |
+          set -euo pipefail
+
+          # Combine all findings from individual checks
+          all_results="[]"
+
+          for f in findings/*.json; do
+            if [[ -f "$f" ]]; then
+              all_results=$(jq -s '.[0] + .[1]' <(echo "$all_results") "$f")
+            fi
+          done
+
+          # Generate final SARIF with all rules and results
+          jq -n --argjson results "$all_results" '{
             "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
             "version": "2.1.0",
             "runs": [{
@@ -234,59 +371,48 @@ jobs:
                 "driver": {
                   "name": "Bash Security Scanner",
                   "version": "1.0.0",
-                  "rules": [{
-                    "id": "unsafe-bash-pattern",
-                    "name": "UnsafeBashPattern",
-                    "shortDescription": {"text": "Potentially unsafe bash pattern detected"},
-                    "defaultConfiguration": {"level": "warning"}
-                  }]
+                  "informationUri": "https://github.com/koalaman/shellcheck",
+                  "rules": [
+                    {
+                      "id": "hardcoded-secret",
+                      "name": "HardcodedSecret",
+                      "shortDescription": {"text": "Potential hardcoded secret detected"},
+                      "defaultConfiguration": {"level": "error"},
+                      "helpUri": "https://owasp.org/www-community/vulnerabilities/Use_of_hard-coded_password"
+                    },
+                    {
+                      "id": "unsafe-bash-pattern",
+                      "name": "UnsafeBashPattern",
+                      "shortDescription": {"text": "Potentially unsafe bash pattern detected"},
+                      "defaultConfiguration": {"level": "warning"}
+                    }
+                  ]
                 }
               },
               "results": $results
             }]
-          }')
+          }' > security-results.sarif
 
-          echo "$sarif" > security-results.sarif
+          echo "Generated SARIF with $(echo "$all_results" | jq 'length') finding(s)"
 
-          if [[ $issues -gt 0 ]]; then
-            echo "::error::Found $issues potentially unsafe pattern(s)"
-            echo "If these are intentional, add them to the allow-list in this workflow."
+      - name: Check for failures
+        if: always()
+        run: |
+          # Fail the job if any security issues were found
+          secrets="${{ steps.hardcoded-secrets.outputs.issues }}"
+          patterns="${{ steps.unsafe-patterns.outputs.issues }}"
+
+          if [[ "${secrets:-0}" -gt 0 ]]; then
+            echo "::error::Hardcoded secrets check failed with $secrets issue(s)"
             exit 1
-          else
-            echo "No unsafe patterns detected"
           fi
 
-      - name: Run ShellCheck
-        run: |
-          # Extract bash scripts from workflow files and check them
-          echo "Running ShellCheck on embedded bash scripts..."
+          if [[ "${patterns:-0}" -gt 0 ]]; then
+            echo "::error::Unsafe patterns check failed with $patterns issue(s)"
+            exit 1
+          fi
 
-          issues=0
-
-          for workflow in .github/workflows/*.yml .github/workflows/*.yaml; do
-            [[ -f "$workflow" ]] || continue
-
-            # Extract run steps and check with shellcheck
-            # Using yq to extract bash/shell run blocks
-            if command -v yq &> /dev/null; then
-              yq eval '.. | select(has("run")) | .run' "$workflow" 2>/dev/null | \
-              while IFS= read -r script; do
-                if [[ -n "$script" && "$script" != "null" ]]; then
-                  echo "$script" | shellcheck -s bash - 2>&1 | while read -r line; do
-                    if [[ "$line" == *"error"* ]] || [[ "$line" == *"warning"* ]]; then
-                      echo "::warning file=$workflow::ShellCheck: $line"
-                      ((issues++)) || true
-                    fi
-                  done
-                fi
-              done
-            else
-              echo "yq not available, running basic shellcheck on workflow"
-              shellcheck --shell=bash -e SC1091,SC2086 -x "$workflow" 2>&1 || true
-            fi
-          done
-
-          echo "ShellCheck analysis complete"
+          echo "All security checks passed"
 
       - name: Upload SARIF results
         uses: github/codeql-action/upload-sarif@1ec7dd2bc4c2d5776ab565aa07221b7432e62cc7 # v4

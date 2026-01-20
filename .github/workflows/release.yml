@@ -13,12 +13,14 @@ permissions: {}
 jobs:
   update-major-tag:
     name: Update Major Version Tag
-    if: ${{ !github.event.release.prerelease }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    if: ${{ !github.event.release.prerelease }}
 
     permissions:
       contents: write
+      id-token: write
+      attestations: write
 
     steps:
       - name: Harden Runner
@@ -29,6 +31,9 @@ jobs:
             api.github.com:443
             github.com:443
             uploads.github.com:443
+            fulcio.sigstore.dev:443
+            rekor.sigstore.dev:443
+            tuf-repo-cdn.sigstore.dev:443
 
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -39,9 +44,10 @@ jobs:
       - name: Extract and validate version
         id: version
         shell: bash
+        env:
+          TAG: ${{ github.event.release.tag_name }}
         run: |
           set -euo pipefail
-          TAG="${{ github.event.release.tag_name }}"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
 
           # Validate semver format (v1.0.0, 1.0.0, or v1.0.0-beta.1)
@@ -57,9 +63,10 @@ jobs:
 
       - name: Check for CHANGELOG entry
         shell: bash
+        env:
+          TAG: ${{ github.event.release.tag_name }}
         run: |
           set -euo pipefail
-          TAG="${{ github.event.release.tag_name }}"
           VERSION="${TAG#v}"
           if [ ! -f CHANGELOG.md ]; then
             echo "::error::CHANGELOG.md not found"
@@ -74,15 +81,17 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          MAJOR: ${{ steps.version.outputs.major }}
+          TAG: ${{ steps.version.outputs.tag }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          COMMIT_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
-          MAJOR="${{ steps.version.outputs.major }}"
-          TAG="${{ steps.version.outputs.tag }}"
 
           update_tag() {
             # Try atomic update first (PATCH), fall back to create if tag doesn't exist
-            if OUTPUT=$(gh api -X PATCH "repos/${{ github.repository }}/git/refs/tags/$MAJOR" \
-              -f sha="${{ github.sha }}" \
+            if OUTPUT=$(gh api -X PATCH "repos/${GITHUB_REPOSITORY}/git/refs/tags/${MAJOR}" \
+              -f sha="${COMMIT_SHA}" \
               -F force=true 2>&1); then
               echo "Updated existing $MAJOR tag"
               return 0
@@ -90,9 +99,9 @@ jobs:
               # Check if it's a "not found" error (tag doesn't exist yet)
               if echo "$OUTPUT" | grep -qi "not found"; then
                 echo "Tag $MAJOR doesn't exist, creating it"
-                gh api "repos/${{ github.repository }}/git/refs" \
-                  -f ref="refs/tags/$MAJOR" \
-                  -f sha="${{ github.sha }}"
+                gh api "repos/${GITHUB_REPOSITORY}/git/refs" \
+                  -f ref="refs/tags/${MAJOR}" \
+                  -f sha="${COMMIT_SHA}"
                 return 0
               else
                 echo "::warning::API call failed: $OUTPUT"
@@ -101,7 +110,7 @@ jobs:
             fi
           }
 
-          # Retry with exponential backoff (3 attempts: 0s, 2s, 4s delays)
+          # Retry with exponential backoff (3 attempts with 1s, 2s delays)
           MAX_ATTEMPTS=3
           for ((i=1; i<=MAX_ATTEMPTS; i++)); do
             if update_tag; then
@@ -122,15 +131,16 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          MAJOR: ${{ steps.version.outputs.major }}
+          EXPECTED_SHA: ${{ github.sha }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
         run: |
           set -euo pipefail
-          MAJOR="${{ steps.version.outputs.major }}"
-          EXPECTED_SHA="${{ github.sha }}"
 
           # Retry verification with backoff (handles eventual consistency)
           MAX_ATTEMPTS=3
           for ((i=1; i<=MAX_ATTEMPTS; i++)); do
-            ACTUAL_SHA=$(gh api "repos/${{ github.repository }}/git/refs/tags/$MAJOR" --jq '.object.sha' 2>/dev/null || echo "")
+            ACTUAL_SHA=$(gh api "repos/${GITHUB_REPOSITORY}/git/refs/tags/${MAJOR}" --jq '.object.sha' 2>/dev/null || echo "")
 
             if [ "$ACTUAL_SHA" = "$EXPECTED_SHA" ]; then
               echo "Verified $MAJOR tag points to $EXPECTED_SHA"
@@ -151,9 +161,9 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.version.outputs.tag }}
         run: |
           set -euo pipefail
-          TAG="${{ steps.version.outputs.tag }}"
           VERSION="${TAG#v}"
 
           # Extract changelog section for this version
@@ -171,17 +181,34 @@ jobs:
             echo "No changelog content to extract (section may be empty)"
           fi
 
-      - name: Generate and upload SBOM
+      - name: Generate SBOM
+        id: sbom
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
         run: |
           set -euo pipefail
-          TAG="${{ steps.version.outputs.tag }}"
 
           # Generate SBOM using GitHub's dependency graph
-          gh api "repos/${{ github.repository }}/dependency-graph/sbom" \
+          gh api "repos/${GITHUB_REPOSITORY}/dependency-graph/sbom" \
             --jq '.sbom' > sbom.spdx.json
+
+          echo "Generated SBOM from dependency graph"
+
+      - name: Attest SBOM
+        uses: actions/attest-sbom@115c3be05ff3974bcbd596578934b3f9ce39bf68 # v2.2.0
+        with:
+          subject-path: sbom.spdx.json
+          sbom-path: sbom.spdx.json
+
+      - name: Upload SBOM to release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          set -euo pipefail
 
           # Upload SBOM to release
           gh release upload "$TAG" sbom.spdx.json --clobber
@@ -191,9 +218,9 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.version.outputs.tag }}
         run: |
           set -euo pipefail
-          TAG="${{ steps.version.outputs.tag }}"
 
           # Retry verification with backoff (handles eventual consistency)
           MAX_ATTEMPTS=3
@@ -215,10 +242,12 @@ jobs:
 
       - name: Write job summary
         shell: bash
+        env:
+          MAJOR: ${{ steps.version.outputs.major }}
+          TAG: ${{ steps.version.outputs.tag }}
+          COMMIT_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
-          MAJOR="${{ steps.version.outputs.major }}"
-          TAG="${{ steps.version.outputs.tag }}"
           {
             echo "## Release Summary"
             echo ""
@@ -226,7 +255,8 @@ jobs:
             echo "|------|-------|"
             echo "| Release Tag | \`$TAG\` |"
             echo "| Major Tag | \`$MAJOR\` |"
-            echo "| Commit | \`${{ github.sha }}\` |"
+            echo "| Commit | \`$COMMIT_SHA\` |"
+            echo "| SBOM | Attested and uploaded |"
             echo ""
             echo "The **$MAJOR** tag now points to **$TAG**."
           } >> "$GITHUB_STEP_SUMMARY"

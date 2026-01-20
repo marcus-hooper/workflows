@@ -6,7 +6,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        Thanks for suggesting a feature! Please describe what you'd like to see.
+        Thanks for suggesting a feature! Please fill out the form below.
 
         **Before submitting**, please [search existing issues](../../issues?q=is%3Aissue+label%3Atype%3Afeature) to avoid duplicates.
 
@@ -40,7 +40,7 @@ body:
     id: area
     attributes:
       label: Area
-      description: Which part of this repository does this affect?
+      description: Which part of workflows does this affect?
       multiple: true
       options:
         - Teams notification formatting

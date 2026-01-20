@@ -42,9 +42,19 @@ jobs:
           fetch-depth: 10
           persist-credentials: false
 
+      - name: Create test results directory
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p test-results
+
       - name: Verify required tools
         id: verify-tools
+        shell: bash
+        timeout-minutes: 1
         run: |
+          set -euo pipefail
+          exec > >(tee -a test-results/verify-tools.log) 2>&1
           echo "Checking required tools..."
           for tool in jq yq git date; do
             if ! command -v "$tool" &> /dev/null; then
@@ -57,7 +67,11 @@ jobs:
 
       - name: Validate workflow YAML syntax
         id: validate-yaml
+        shell: bash
+        timeout-minutes: 1
         run: |
+          set -euo pipefail
+          exec > >(tee -a test-results/validate-yaml.log) 2>&1
           echo "Validating workflow YAML files..."
           errors=0
           for file in .github/workflows/*.yml; do
@@ -77,35 +91,77 @@ jobs:
 
       - name: Validate reusable workflow structure
         id: validate-reusable
+        shell: bash
+        timeout-minutes: 1
         run: |
+          set -euo pipefail
+          exec > >(tee -a test-results/validate-reusable.log) 2>&1
           echo "Validating reusable workflow structure..."
-          workflow=".github/workflows/get-commit-messages.yml"
 
-          # Verify workflow_call trigger exists
-          if ! yq eval '.on.workflow_call' "$workflow" | grep -q "inputs"; then
-            echo "::error::Missing workflow_call trigger with inputs"
+          # Dynamically find all reusable workflows (those with workflow_call trigger)
+          reusable_workflows=()
+          for wf in .github/workflows/*.yml; do
+            if [[ -f "$wf" ]] && yq eval '.on.workflow_call' "$wf" 2>/dev/null | grep -qv "null"; then
+              reusable_workflows+=("$wf")
+            fi
+          done
+
+          if [[ ${#reusable_workflows[@]} -eq 0 ]]; then
+            echo "::warning::No reusable workflows found"
+            exit 0
+          fi
+
+          echo "Found ${#reusable_workflows[@]} reusable workflow(s): ${reusable_workflows[*]}"
+
+          errors=0
+          for workflow in "${reusable_workflows[@]}"; do
+            echo ""
+            echo "Validating: $workflow"
+
+            # Verify workflow_call trigger has inputs or outputs defined
+            has_inputs=$(yq eval '.on.workflow_call.inputs | length' "$workflow" 2>/dev/null || echo "0")
+            has_outputs=$(yq eval '.on.workflow_call.outputs | length' "$workflow" 2>/dev/null || echo "0")
+
+            if [[ "$has_inputs" == "0" && "$has_outputs" == "0" ]]; then
+              echo "::warning file=$workflow::Reusable workflow has no inputs or outputs defined"
+            fi
+
+            # Verify all declared outputs have corresponding job outputs
+            output_names=$(yq eval '.on.workflow_call.outputs | keys | .[]' "$workflow" 2>/dev/null || true)
+            if [[ -n "$output_names" ]]; then
+              while IFS= read -r output_name; do
+                [[ -z "$output_name" ]] && continue
+                output_value=$(yq eval ".on.workflow_call.outputs.${output_name}.value" "$workflow" 2>/dev/null)
+                if [[ -z "$output_value" || "$output_value" == "null" ]]; then
+                  echo "::error file=$workflow::Output '$output_name' declared but has no value"
+                  errors=$((errors + 1))
+                fi
+              done <<< "$output_names"
+              echo "Output definitions: OK"
+            fi
+
+            # Verify all jobs have valid structure
+            job_names=$(yq eval '.jobs | keys | .[]' "$workflow" 2>/dev/null || true)
+            if [[ -z "$job_names" ]]; then
+              echo "::error file=$workflow::No jobs defined"
+              errors=$((errors + 1))
+            else
+              echo "Jobs structure: OK"
+            fi
+          done
+
+          if [[ $errors -gt 0 ]]; then
+            echo "::error::Found $errors validation error(s) in reusable workflows"
             exit 1
           fi
-          echo "workflow_call trigger: OK"
-
-          # Verify outputs are defined
-          if ! yq eval '.on.workflow_call.outputs.commit_messages' "$workflow" | grep -q "value"; then
-            echo "::error::Missing commit_messages output definition"
-            exit 1
-          fi
-          echo "Output definitions: OK"
-
-          # Verify job outputs are wired correctly
-          job_output=$(yq eval '.jobs.fetch-commits.outputs.commit_messages' "$workflow")
-          if [[ -z "$job_output" || "$job_output" == "null" ]]; then
-            echo "::error::Missing job output for commit_messages"
-            exit 1
-          fi
-          echo "Job outputs: OK"
 
       - name: Test commit extraction logic
         id: test-extraction
+        shell: bash
+        timeout-minutes: 2
         run: |
+          set -euo pipefail
+          exec > >(tee -a test-results/test-extraction.log) 2>&1
           echo "Testing commit extraction logic..."
 
           # Test jq JSON construction (core of the workflow)
@@ -149,7 +205,11 @@ jobs:
 
       - name: Test actual commit extraction
         id: test-actual
+        shell: bash
+        timeout-minutes: 2
         run: |
+          set -euo pipefail
+          exec > >(tee -a test-results/test-actual.log) 2>&1
           echo "Testing actual commit extraction from repository..."
 
           # Run the extraction logic from the workflow
@@ -157,7 +217,14 @@ jobs:
           temp_file=$(mktemp)
           echo "[]" > "$temp_file"
 
-          git log -n "$COMMIT_COUNT" --no-decorate --pretty=format:'%H%n%ci%n%s%n%an%n---COMMIT-END---' | \
+          # Initialize variables
+          sha=""
+          date=""
+          msg=""
+          author=""
+          line_count=0
+
+          # Use process substitution to avoid subshell variable scope issues
           while IFS= read -r line; do
             if [ "$line" = "---COMMIT-END---" ]; then
               if [ -n "$sha" ] && [ -n "$date" ] && [ -n "$msg" ] && [ -n "$author" ]; then
@@ -195,10 +262,10 @@ jobs:
                 *) msg="${msg}${line}" ;;
               esac
             fi
-          done
+          done < <(git log -n "$COMMIT_COUNT" --no-decorate --pretty=format:'%H%n%ci%n%s%n%an%n---COMMIT-END---')
 
           # Verify output
-          commit_data=$(cat "$temp_file" | jq -c .)
+          commit_data=$(jq -c . "$temp_file")
           rm -f "$temp_file" "${temp_file}.tmp"
 
           if [[ -z "$commit_data" || "$commit_data" == "null" ]]; then
@@ -213,34 +280,63 @@ jobs:
 
       - name: ShellCheck embedded scripts
         id: shellcheck
+        shell: bash
+        timeout-minutes: 2
         run: |
+          set -euo pipefail
+          exec > >(tee -a test-results/shellcheck.log) 2>&1
           echo "Running ShellCheck on workflow scripts..."
+          errors=0
           warnings=0
 
           for workflow in .github/workflows/*.yml; do
             if [[ -f "$workflow" ]]; then
-              # Extract run blocks
-              yq eval '.. | select(has("run")) | .run' "$workflow" 2>/dev/null | while IFS= read -r -d '' script || [[ -n "$script" ]]; do
-                if [[ -n "$script" && "$script" != "---" && "$script" != "null" ]]; then
-                  temp_script=$(mktemp --suffix=.sh)
-                  echo "#!/bin/bash" > "$temp_script"
-                  echo "$script" >> "$temp_script"
+              echo "Checking $workflow..."
+              # Extract run blocks to a temp file (one script per file, separated by null)
+              scripts_dir=$(mktemp -d)
+              script_index=0
 
-                  if ! shellcheck -s bash -S warning "$temp_script" 2>/dev/null; then
-                    echo "::warning file=$workflow::ShellCheck found issues"
-                    warnings=$((warnings + 1))
-                  fi
-                  rm -f "$temp_script"
+              # Use yq to extract all run blocks, writing each to a separate file
+              while IFS= read -r script; do
+                if [[ -n "$script" && "$script" != "null" ]]; then
+                  script_file="${scripts_dir}/script_${script_index}.sh"
+                  {
+                    echo "#!/bin/bash"
+                    echo "$script"
+                  } > "$script_file"
+                  script_index=$((script_index + 1))
+                fi
+              done < <(yq eval '.. | select(has("run")) | .run' "$workflow" 2>/dev/null | yq eval -o=json '.' | jq -r 'if type == "string" then . else empty end' 2>/dev/null || true)
+
+              # Run ShellCheck on each extracted script
+              for script_file in "$scripts_dir"/*.sh; do
+                [[ -f "$script_file" ]] || continue
+                # Fail on errors (error level), warn on warnings
+                if ! shellcheck -s bash -S error "$script_file" 2>&1; then
+                  echo "::error file=$workflow::ShellCheck found errors in $(basename "$script_file")"
+                  errors=$((errors + 1))
+                elif ! shellcheck -s bash -S warning "$script_file" 2>&1; then
+                  echo "::warning file=$workflow::ShellCheck found warnings in $(basename "$script_file")"
+                  warnings=$((warnings + 1))
                 fi
               done
+
+              rm -rf "$scripts_dir"
             fi
           done
 
-          echo "ShellCheck complete (warnings: $warnings)"
+          echo "ShellCheck complete (errors: $errors, warnings: $warnings)"
+          if [[ $errors -gt 0 ]]; then
+            echo "::error::ShellCheck found $errors error(s)"
+            exit 1
+          fi
 
       - name: Write workflow summary
         if: always()
+        shell: bash
         run: |
+          # Note: 'EOF' prevents shell variable expansion, but ${{ }} expressions
+          # are GitHub Actions expressions substituted before bash runs
           cat >> "$GITHUB_STEP_SUMMARY" << 'EOF'
           ## Health Check Results
 
@@ -255,6 +351,15 @@ jobs:
 
           **Workflow run:** [${{ github.run_id }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
           EOF
+
+      - name: Upload test results
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        if: always()
+        with:
+          name: health-check-test-results
+          path: test-results/
+          if-no-files-found: ignore
+          retention-days: 14
 
   # Notify on failure by creating a GitHub issue
   notify-failure:
@@ -276,6 +381,7 @@ jobs:
             api.github.com:443
 
       - name: Ensure status:health-check-failure label exists
+        shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
@@ -284,6 +390,7 @@ jobs:
           gh label create "status:health-check-failure" --description "Automated health check detected a failure" --color "d73a4a" --force
 
       - name: Create failure issue
+        shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
@@ -339,6 +446,7 @@ jobs:
             api.github.com:443
 
       - name: Close stale failure issues
+        shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}

@@ -42,6 +42,7 @@ jobs:
           persist-credentials: false
 
       - name: Validate CHANGELOG format
+        shell: bash
         run: |
           echo "Validating CHANGELOG.md format..."
           if [[ ! -f CHANGELOG.md ]]; then
@@ -74,6 +75,7 @@ jobs:
           persist-credentials: false
 
       - name: Validate workflow YAML syntax
+        shell: bash
         run: |
           echo "Validating workflow YAML files..."
           errors=0
@@ -91,6 +93,41 @@ jobs:
             exit 1
           fi
           echo "All workflow YAML files are valid"
+
+  actionlint:
+    name: Action Lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76 # v2.14.0
+        with:
+          egress-policy: block
+          allowed-endpoints: >
+            api.github.com:443
+            github.com:443
+            objects.githubusercontent.com:443
+
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Install actionlint
+        shell: bash
+        run: |
+          version="1.7.7"
+          checksum="023070a287cd8cccd71515fedc843f1985bf96c436b7effaecce67290e7e0757"
+          tarball="actionlint_${version}_linux_amd64.tar.gz"
+          curl -sLO "https://github.com/rhysd/actionlint/releases/download/v${version}/${tarball}"
+          echo "${checksum}  ${tarball}" | sha256sum -c -
+          tar xzf "${tarball}" actionlint
+          rm -f "${tarball}"
+
+      - name: Run actionlint
+        shell: bash
+        run: ./actionlint -color
 
   shellcheck:
     name: ShellCheck
@@ -112,50 +149,100 @@ jobs:
           persist-credentials: false
 
       - name: Extract and lint bash scripts from workflows
+        shell: bash
         run: |
           echo "Extracting and linting bash scripts from workflow files..."
-          errors=0
+          error_file=$(mktemp)
+          echo "0" > "$error_file"
 
           for workflow in .github/workflows/*.yml; do
             if [[ -f "$workflow" ]]; then
               echo "Processing $workflow..."
 
-              # Extract bash/shell run blocks using yq
-              # Get all run steps that use bash or default shell
-              script_count=$(yq eval '.. | select(has("run")) | .run' "$workflow" 2>/dev/null | grep -c "^" || echo "0")
+              # Extract run blocks to a temp file (preserves multi-line scripts)
+              temp_scripts=$(mktemp)
+              yq eval '.. | select(has("run")) | .run' "$workflow" 2>/dev/null > "$temp_scripts"
 
-              if [[ "$script_count" -gt 0 ]]; then
-                # Extract each run block and check with shellcheck
-                yq eval '.. | select(has("run")) | .run' "$workflow" 2>/dev/null | while IFS= read -r line; do
-                  if [[ -n "$line" && "$line" != "---" && "$line" != "null" ]]; then
-                    # Create temp file for shellcheck
-                    temp_script=$(mktemp --suffix=.sh)
-                    echo "#!/bin/bash" > "$temp_script"
-                    echo "$line" >> "$temp_script"
+              # Process each script block (separated by ---)
+              script_num=0
+              current_script=""
+              while IFS= read -r line || [[ -n "$current_script" ]]; do
+                if [[ "$line" == "---" ]] || [[ -z "$line" && -z "${line+x}" ]]; then
+                  # End of a script block, process it
+                  if [[ -n "$current_script" && "$current_script" != "null" ]]; then
+                    script_num=$((script_num + 1))
+                    temp_file=$(mktemp --suffix=.sh)
+                    {
+                      echo "#!/bin/bash"
+                      echo "$current_script"
+                    } > "$temp_file"
 
-                    if ! shellcheck -s bash -S warning "$temp_script" 2>/dev/null; then
-                      echo "::warning file=$workflow::ShellCheck found issues in a run block"
+                    if ! shellcheck -s bash -S warning "$temp_file" 2>&1; then
+                      echo "::error file=$workflow::ShellCheck found issues in run block #$script_num"
+                      echo "1" > "$error_file"
                     fi
-                    rm -f "$temp_script"
+                    rm -f "$temp_file"
                   fi
-                done
+                  current_script=""
+                else
+                  if [[ -n "$current_script" ]]; then
+                    current_script="$current_script"$'\n'"$line"
+                  else
+                    current_script="$line"
+                  fi
+                fi
+              done < "$temp_scripts"
+
+              # Process final block if exists
+              if [[ -n "$current_script" && "$current_script" != "null" ]]; then
+                script_num=$((script_num + 1))
+                temp_file=$(mktemp --suffix=.sh)
+                {
+                  echo "#!/bin/bash"
+                  echo "$current_script"
+                } > "$temp_file"
+
+                if ! shellcheck -s bash -S warning "$temp_file" 2>&1; then
+                  echo "::error file=$workflow::ShellCheck found issues in run block #$script_num"
+                  echo "1" > "$error_file"
+                fi
+                rm -f "$temp_file"
               fi
+
+              rm -f "$temp_scripts"
             fi
           done
 
-          echo "ShellCheck analysis complete"
+          errors=$(cat "$error_file")
+          rm -f "$error_file"
+
+          if [[ "$errors" -ne 0 ]]; then
+            echo "::error::ShellCheck found issues in one or more workflow files"
+            exit 1
+          fi
+          echo "ShellCheck analysis complete - no issues found"
 
   ci-status:
     name: CI Status
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     if: always()
-    needs: [validate-changelog, validate-yaml, shellcheck]
+    needs: [validate-changelog, validate-yaml, actionlint, shellcheck]
 
     steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76 # v2.14.0
+        with:
+          egress-policy: block
+          allowed-endpoints: >
+            github.com:443
+
       - name: Check CI status
+        shell: bash
         run: |
           if [[ "${{ needs.validate-changelog.result }}" != "success" ]] || \
              [[ "${{ needs.validate-yaml.result }}" != "success" ]] || \
+             [[ "${{ needs.actionlint.result }}" != "success" ]] || \
              [[ "${{ needs.shellcheck.result }}" != "success" ]]; then
             echo "::error::One or more CI jobs failed"
             exit 1

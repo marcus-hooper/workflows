@@ -24,7 +24,21 @@ updates:
       ci-actions:
         patterns:
           - "actions/*"
-          - "github/dependency-review-action"
+          - "github/*"
+        exclude-patterns:
+          - "github/codeql-action"
+        update-types:
+          - "minor"
+          - "patch"
+      # Third-party actions (catch-all)
+      other-actions:
+        patterns:
+          - "*"
+        exclude-patterns:
+          - "ossf/*"
+          - "github/*"
+          - "step-security/*"
+          - "actions/*"
         update-types:
           - "minor"
           - "patch"
