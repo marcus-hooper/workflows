@@ -177,7 +177,7 @@ jobs:
           for pattern in "${!patterns[@]}"; do
             description="${patterns[$pattern]}"
             # Search in workflow files, excluding this security workflow's pattern definitions
-            while IFS=: read -r file line_num content; do
+            while IFS=: read -r file line_num _; do
               if [[ -n "$file" && -n "$line_num" ]]; then
                 # Skip this file's pattern definitions
                 if [[ "$file" == ".github/workflows/security.yml" ]]; then
@@ -246,7 +246,7 @@ jobs:
           for pattern in "${!unsafe_patterns[@]}"; do
             description="${unsafe_patterns[$pattern]}"
 
-            while IFS=: read -r file line_num content; do
+            while IFS=: read -r file line_num _; do
               if [[ -n "$file" && -n "$line_num" ]]; then
                 # Check allow-list
                 allow_key="$file:$(echo "$pattern" | sed 's/\\b//g' | cut -c1-20)"
@@ -313,7 +313,6 @@ jobs:
           # Run shellcheck with JSON output, capture results even on findings
           set +e
           shellcheck --severity=warning --format=json "${scripts[@]}" > shellcheck-raw.json 2>/dev/null
-          sc_exit=$?
           set -e
 
           # Convert ShellCheck JSON to our findings format

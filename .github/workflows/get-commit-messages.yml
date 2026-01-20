@@ -76,7 +76,7 @@ jobs:
           done
           
           # Output the final JSON
-          commit_data=$(cat "$temp_file" | jq -c .)
+          commit_data=$(jq -c . < "$temp_file")
           rm -f "$temp_file" "${temp_file}.tmp"
           
           {

@@ -46,4 +46,4 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Summary
-        run: echo "Labels synced from .github/labels.yml" >> $GITHUB_STEP_SUMMARY
+        run: echo "Labels synced from .github/labels.yml" >> "$GITHUB_STEP_SUMMARY"

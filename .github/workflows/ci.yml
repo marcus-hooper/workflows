@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
   push:
     branches: [main]
-    paths-ignore: &paths-ignore
+    paths-ignore:
       - '**.md'
       - 'docs/**'
       - '.github/*.md'
@@ -12,7 +12,12 @@ on:
       - 'LICENSE'
   pull_request:
     branches: [main]
-    paths-ignore: *paths-ignore
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - '.github/*.md'
+      - '.github/ISSUE_TEMPLATE/**'
+      - 'LICENSE'
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}

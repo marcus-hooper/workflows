@@ -74,8 +74,10 @@ jobs:
       - name: Summary
         if: success()
         run: |
-          echo "## CodeQL Analysis Complete" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "**Languages analyzed:** GitHub Actions" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "Results are available in the [Security tab](https://github.com/${{ github.repository }}/security/code-scanning)." >> $GITHUB_STEP_SUMMARY
+          {
+            echo "## CodeQL Analysis Complete"
+            echo ""
+            echo "**Languages analyzed:** GitHub Actions"
+            echo ""
+            echo "Results are available in the [Security tab](https://github.com/${{ github.repository }}/security/code-scanning)."
+          } >> "$GITHUB_STEP_SUMMARY"
