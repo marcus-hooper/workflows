@@ -1,0 +1,21 @@
+# Local Claude Code instructions (per-developer)
+CLAUDE.local.md
+
+# OS generated files
+.DS_Store
+Thumbs.db
+
+# Editor/IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Local testing (nektos/act)
+.actrc
+.secrets
+
+# Temp files
+*.tmp
+*.log
