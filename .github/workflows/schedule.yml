@@ -335,8 +335,8 @@ jobs:
         if: always()
         shell: bash
         run: |
-          # Note: 'EOF' prevents shell variable expansion, but ${{ }} expressions
-          # are GitHub Actions expressions substituted before bash runs
+          # Note: 'EOF' prevents shell variable expansion, but GitHub Actions
+          # expressions (like steps.*.outcome) are substituted before bash runs
           cat >> "$GITHUB_STEP_SUMMARY" << 'EOF'
           ## Health Check Results
 

@@ -70,7 +70,6 @@ jobs:
         uses: github/codeql-action/analyze@1ec7dd2bc4c2d5776ab565aa07221b7432e62cc7 # v4
         with:
           category: "/language:actions"
-          fail-on: error
 
       - name: Summary
         if: success()
