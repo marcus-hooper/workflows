@@ -1,0 +1,147 @@
+name: Dependabot Auto-Merge
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions: {}
+
+jobs:
+  auto-merge:
+    name: Auto-merge safe updates
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    if: github.actor == 'dependabot[bot]'
+
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76 # v2.14.0
+        with:
+          egress-policy: block
+          allowed-endpoints: >
+            api.github.com:443
+
+      - name: Fetch Dependabot metadata
+        id: metadata
+        uses: dependabot/fetch-metadata@21025c705c08248db411dc16f3619e6b5f9ea21a # v2.5.0
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Auto-merge patch and minor updates
+        if: |
+          steps.metadata.outputs.package-ecosystem != 'github_actions' &&
+          (steps.metadata.outputs.update-type == 'version-update:semver-patch' ||
+           steps.metadata.outputs.update-type == 'version-update:semver-minor')
+        run: |
+          echo "Auto-merging ${UPDATE_TYPE} update"
+          echo "Package: ${DEPENDENCY_NAMES}"
+          if ! gh pr merge --auto --squash "$PR_URL" 2>&1; then
+            echo "::warning::Auto-merge request failed - PR may already have auto-merge enabled or branch protection rules may not be met"
+          fi
+        env:
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          UPDATE_TYPE: ${{ steps.metadata.outputs.update-type }}
+          DEPENDENCY_NAMES: ${{ steps.metadata.outputs.dependency-names }}
+
+      - name: Skip auto-merge for GitHub Actions updates
+        if: |
+          steps.metadata.outputs.package-ecosystem == 'github_actions' &&
+          steps.metadata.outputs.update-type != 'version-update:semver-major'
+        run: |
+          echo "GitHub Actions updates require manual merge (GITHUB_TOKEN cannot modify workflow files)"
+
+          # Check if we already commented on this PR using a hidden marker
+          EXISTING_COMMENT=$(gh pr view "$PR_URL" --json comments --jq '.comments[].body' | grep -c "$COMMENT_MARKER" || true)
+          if [ "$EXISTING_COMMENT" -eq "0" ]; then
+            gh pr comment "$PR_URL" --body "$COMMENT_BODY"
+          else
+            echo "Comment already exists, skipping"
+          fi
+        env:
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          COMMENT_MARKER: "<!-- dependabot-auto-merge:gha-manual -->"
+          COMMENT_BODY: |
+            <!-- dependabot-auto-merge:gha-manual -->
+            **GitHub Actions update requires manual merge**
+
+            This PR updates a GitHub Actions workflow dependency.
+
+            Due to GitHub security restrictions, the `GITHUB_TOKEN` cannot modify workflow files, so this PR cannot be auto-merged.
+
+            **Action required:** Please review and merge this PR manually.
+
+      - name: Handle major updates
+        if: |
+          steps.metadata.outputs.update-type == 'version-update:semver-major' &&
+          steps.metadata.outputs.package-ecosystem != 'github_actions'
+        run: |
+          echo "Major update detected - requires manual review"
+          gh pr edit "$PR_URL" --add-label "deps:major" --add-label "status:needs-review"
+
+          # Check if we already commented on this PR using a hidden marker
+          EXISTING_COMMENT=$(gh pr view "$PR_URL" --json comments --jq '.comments[].body' | grep -c "$COMMENT_MARKER" || true)
+          if [ "$EXISTING_COMMENT" -eq "0" ]; then
+            gh pr comment "$PR_URL" --body "$COMMENT_BODY"
+          else
+            echo "Comment already exists, skipping"
+          fi
+        env:
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          COMMENT_MARKER: "<!-- dependabot-auto-merge:major-update -->"
+          COMMENT_BODY: |
+            <!-- dependabot-auto-merge:major-update -->
+            **Major version update detected**
+
+            This PR updates a dependency to a new major version.
+
+            **Action required:**
+            1. Review the changelog for breaking changes
+            2. Test thoroughly before merging
+            3. Merge manually when ready
+
+            Major updates are not auto-merged for safety.
+
+      - name: Handle GitHub Actions major updates
+        if: |
+          steps.metadata.outputs.update-type == 'version-update:semver-major' &&
+          steps.metadata.outputs.package-ecosystem == 'github_actions'
+        run: |
+          echo "GitHub Actions major update detected - requires manual review and merge"
+          gh pr edit "$PR_URL" --add-label "deps:major" --add-label "status:needs-review"
+
+          # Check if we already commented on this PR using a hidden marker
+          EXISTING_COMMENT=$(gh pr view "$PR_URL" --json comments --jq '.comments[].body' | grep -c "$COMMENT_MARKER" || true)
+          if [ "$EXISTING_COMMENT" -eq "0" ]; then
+            gh pr comment "$PR_URL" --body "$COMMENT_BODY"
+          else
+            echo "Comment already exists, skipping"
+          fi
+        env:
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          COMMENT_MARKER: "<!-- dependabot-auto-merge:gha-major -->"
+          COMMENT_BODY: |
+            <!-- dependabot-auto-merge:gha-major -->
+            **GitHub Actions major version update**
+
+            This PR updates a GitHub Actions dependency to a new major version.
+
+            **Action required:**
+            1. Review the changelog for breaking changes
+            2. Test thoroughly before merging
+            3. Merge manually when ready
+
+            > **Note:** Due to GitHub security restrictions, the `GITHUB_TOKEN` cannot modify workflow files, so this PR cannot be auto-merged regardless of version type.
+
+            Major updates are not auto-merged for safety.
