@@ -222,8 +222,9 @@ jobs:
           set -euo pipefail
 
           # Patterns that indicate potentially unsafe bash code
+          # Note: eval pattern matches only when eval is a command, not a subcommand (e.g., 'yq eval' is safe)
           declare -A unsafe_patterns=(
-            ['\beval\s']="eval can execute arbitrary code"
+            ['(^|[;|&(]|\$\()\s*eval\s']="eval can execute arbitrary code"
             ['\bcurl\s.*\|\s*(bash|sh)']="Piping curl to shell is dangerous"
             ['\bwget\s.*\|\s*(bash|sh)']="Piping wget to shell is dangerous"
             ['source\s+<\(']="Process substitution with source can be unsafe"
