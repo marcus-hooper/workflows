@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-01-19
+
 ### Added
 
 - CI workflow with CHANGELOG validation and actionlint (includes YAML and ShellCheck)
@@ -28,6 +30,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- Fix token permissions and prevent code injection vulnerability in `get-commit-messages` workflow
 - Pin all GitHub Actions to commit SHAs for supply chain security
 - Add step-security/harden-runner with egress blocking to all workflows
 - Network egress restricted to only required endpoints per workflow
@@ -72,5 +75,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Security improvements or vulnerability fixes
 -->
 
-[Unreleased]: https://github.com/marcus-hooper/workflows/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/marcus-hooper/workflows/compare/v1.1.0...HEAD
+[1.1.0]: https://github.com/marcus-hooper/workflows/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/marcus-hooper/workflows/releases/tag/v1.0.0
