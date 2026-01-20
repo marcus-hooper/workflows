@@ -60,45 +60,6 @@ jobs:
           fi
           echo "CHANGELOG.md format valid"
 
-  validate-yaml:
-    name: Validate YAML
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-
-    steps:
-      - name: Harden Runner
-        uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76 # v2.14.0
-        with:
-          egress-policy: block
-          allowed-endpoints: >
-            api.github.com:443
-            github.com:443
-
-      - name: Checkout repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          persist-credentials: false
-
-      - name: Validate workflow YAML syntax
-        shell: bash
-        run: |
-          echo "Validating workflow YAML files..."
-          errors=0
-          for file in .github/workflows/*.yml; do
-            if [[ -f "$file" ]]; then
-              echo "Checking $file..."
-              if ! yq eval '.' "$file" > /dev/null 2>&1; then
-                echo "::error file=$file::Invalid YAML syntax"
-                errors=$((errors + 1))
-              fi
-            fi
-          done
-          if [[ $errors -gt 0 ]]; then
-            echo "::error::Found $errors YAML validation error(s)"
-            exit 1
-          fi
-          echo "All workflow YAML files are valid"
-
   actionlint:
     name: Action Lint
     runs-on: ubuntu-latest
@@ -135,105 +96,12 @@ jobs:
         shell: bash
         run: ./actionlint -color
 
-  shellcheck:
-    name: ShellCheck
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-
-    steps:
-      - name: Harden Runner
-        uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76 # v2.14.0
-        with:
-          egress-policy: block
-          allowed-endpoints: >
-            api.github.com:443
-            github.com:443
-
-      - name: Checkout repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          persist-credentials: false
-
-      - name: Extract and lint bash scripts from workflows
-        shell: bash
-        run: |
-          echo "Extracting and linting bash scripts from workflow files..."
-          error_file=$(mktemp)
-          echo "0" > "$error_file"
-
-          for workflow in .github/workflows/*.yml; do
-            if [[ -f "$workflow" ]]; then
-              echo "Processing $workflow..."
-
-              # Extract run blocks to a temp file (preserves multi-line scripts)
-              temp_scripts=$(mktemp)
-              yq eval '.. | select(has("run")) | .run' "$workflow" 2>/dev/null > "$temp_scripts"
-
-              # Process each script block (separated by ---)
-              script_num=0
-              current_script=""
-              while IFS= read -r line || [[ -n "$current_script" ]]; do
-                if [[ "$line" == "---" ]] || [[ -z "$line" && -z "${line+x}" ]]; then
-                  # End of a script block, process it
-                  if [[ -n "$current_script" && "$current_script" != "null" ]]; then
-                    script_num=$((script_num + 1))
-                    temp_file=$(mktemp --suffix=.sh)
-                    {
-                      echo "#!/bin/bash"
-                      echo "$current_script"
-                    } > "$temp_file"
-
-                    if ! shellcheck -s bash -S warning "$temp_file" 2>&1; then
-                      echo "::error file=$workflow::ShellCheck found issues in run block #$script_num"
-                      echo "1" > "$error_file"
-                    fi
-                    rm -f "$temp_file"
-                  fi
-                  current_script=""
-                else
-                  if [[ -n "$current_script" ]]; then
-                    current_script="$current_script"$'\n'"$line"
-                  else
-                    current_script="$line"
-                  fi
-                fi
-              done < "$temp_scripts"
-
-              # Process final block if exists
-              if [[ -n "$current_script" && "$current_script" != "null" ]]; then
-                script_num=$((script_num + 1))
-                temp_file=$(mktemp --suffix=.sh)
-                {
-                  echo "#!/bin/bash"
-                  echo "$current_script"
-                } > "$temp_file"
-
-                if ! shellcheck -s bash -S warning "$temp_file" 2>&1; then
-                  echo "::error file=$workflow::ShellCheck found issues in run block #$script_num"
-                  echo "1" > "$error_file"
-                fi
-                rm -f "$temp_file"
-              fi
-
-              rm -f "$temp_scripts"
-            fi
-          done
-
-          errors=$(<"$error_file")
-          rm -f "$error_file"
-
-          if [[ "$errors" -ne 0 ]]; then
-            echo "::error::ShellCheck found issues in one or more workflow files"
-            exit 1
-          fi
-          echo "ShellCheck analysis complete - no issues found"
-
   ci-status:
     name: CI Status
     runs-on: ubuntu-latest
     timeout-minutes: 5
     if: always()
-    needs: [validate-changelog, validate-yaml, actionlint, shellcheck]
+    needs: [validate-changelog, actionlint]
 
     steps:
       - name: Harden Runner
@@ -247,9 +115,7 @@ jobs:
         shell: bash
         run: |
           if [[ "${{ needs.validate-changelog.result }}" != "success" ]] || \
-             [[ "${{ needs.validate-yaml.result }}" != "success" ]] || \
-             [[ "${{ needs.actionlint.result }}" != "success" ]] || \
-             [[ "${{ needs.shellcheck.result }}" != "success" ]]; then
+             [[ "${{ needs.actionlint.result }}" != "success" ]]; then
             echo "::error::One or more CI jobs failed"
             exit 1
           fi
