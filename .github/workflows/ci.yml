@@ -219,7 +219,7 @@ jobs:
             fi
           done
 
-          errors=$(cat "$error_file")
+          errors=$(<"$error_file")
           rm -f "$error_file"
 
           if [[ "$errors" -ne 0 ]]; then
