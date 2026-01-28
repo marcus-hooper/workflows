@@ -63,7 +63,7 @@
 
 - name: "status:wontfix"
   description: "Will not be fixed"
-  color: "E4E4E4"
+  color: "FFFFFF"
 
 - name: "status:duplicate"
   description: "Duplicate of another issue"
