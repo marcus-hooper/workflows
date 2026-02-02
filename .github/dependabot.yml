@@ -47,5 +47,4 @@ updates:
       - "deps:all"
       - "deps:github-actions"
     commit-message:
-      prefix: "chore(ci)"
-      include: "scope"
+      prefix: "chore(deps)"
