@@ -24,6 +24,7 @@ updates:
       ci-actions:
         patterns:
           - "actions/*"
+          - "dependabot/*"
           - "github/*"
         exclude-patterns:
           - "github/codeql-action"
