@@ -113,7 +113,7 @@ jobs:
           echo "No secrets detected"
 
       - name: Upload SARIF results
-        uses: github/codeql-action/upload-sarif@ef618feace3c4838ae42b239ab86e8fb46437508 # v4
+        uses: github/codeql-action/upload-sarif@cb4e075f119f8bccbc942d49655b2cd4dc6e615a # v4
         if: always()
         with:
           sarif_file: gitleaks-results.sarif
@@ -415,7 +415,7 @@ jobs:
           echo "All security checks passed"
 
       - name: Upload SARIF results
-        uses: github/codeql-action/upload-sarif@ef618feace3c4838ae42b239ab86e8fb46437508 # v4
+        uses: github/codeql-action/upload-sarif@cb4e075f119f8bccbc942d49655b2cd4dc6e615a # v4
         if: always()
         with:
           sarif_file: security-results.sarif
