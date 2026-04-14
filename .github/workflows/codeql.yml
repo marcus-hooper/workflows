@@ -61,13 +61,13 @@ jobs:
       # - ShellCheck in ci.yml (lint and security rules)
       # - Custom security checks in security.yml (hardcoded secrets, unsafe patterns)
       - name: Initialize CodeQL
-        uses: github/codeql-action/init@34950e1b113b30df4edee1a6d3a605242df0c40b # v4
+        uses: github/codeql-action/init@65216971a11ded447a6b76263d5a144519e5eee1 # v4
         with:
           languages: actions
           queries: security-and-quality
 
       - name: Perform CodeQL Analysis
-        uses: github/codeql-action/analyze@34950e1b113b30df4edee1a6d3a605242df0c40b # v4
+        uses: github/codeql-action/analyze@65216971a11ded447a6b76263d5a144519e5eee1 # v4
         with:
           category: "/language:actions"
 
