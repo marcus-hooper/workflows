@@ -11,6 +11,14 @@ updates:
     open-pull-requests-limit: 3
     rebase-strategy: "auto"
     groups:
+      # MUST be listed FIRST — Dependabot uses first-matching-group, so this wins
+      # over the catch-alls below. The codeql-action sub-actions (init, analyze,
+      # upload-sarif) are ONE release train and must bump together; grouping across
+      # ALL update types (no update-types filter) keeps them from splitting and
+      # desyncing CodeQL ("Loaded a configuration file for version X, running Y").
+      codeql-action:
+        patterns:
+          - "github/codeql-action*"
       # Security-related actions - prioritize these
       security-actions:
         patterns:
